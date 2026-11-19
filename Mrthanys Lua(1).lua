@@ -666,8 +666,7 @@ local function draw_nearest_enemy_direction()
 end
 
 local hud_text = Drawing.new("Text")
-hud_text.Text = "MRTHANYS LUA | SCANNING
-p200 resolver ong"
+hud_text.Text = "MRTHANYS LUA | SCANNING\np200 resolver ong"
 hud_text.Position = vector(16, 316)
 hud_text.Color = color(80, 220, 255)
 hud_text.Size = 16
