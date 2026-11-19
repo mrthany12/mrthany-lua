@@ -1,4 +1,3 @@
-```lua name=Mrthanys Lua.txt
 --[[
     Mrthanys Lua
     Lua-primary adaptive resolver
@@ -23,6 +22,7 @@ local miss_cycle_delay = resolver_sec:new_slider("Miss cycle delay", 0, 250, 80,
 local random_candidate_limit = resolver_sec:new_slider("Random candidates", 2, 10, 6, 0, "")
 local show_indicator = display_sec:new_toggle("Show resolver indicator", true)
 local show_stats = display_sec:new_toggle("Show hit / miss stats", true)
+local show_enemy_direction = display_sec:new_toggle("Show nearest enemy arrow", true)
 
 local states_by_player = {}
 local next_update_phase = 0
@@ -580,6 +580,91 @@ client.set_event_callback("aim_hit", function(e)
     end
 end)
 
+-- Nearest-enemy direction indicator (camera-relative).
+local function draw_nearest_enemy_direction()
+    if not show_enemy_direction:get() then
+        return
+    end
+
+    local local_player = entity.get_local_player()
+    if not local_player or not entity.is_alive(local_player) then
+        return
+    end
+
+    local local_pos = entity.get_player_position(local_player)
+    if not local_pos then
+        return
+    end
+
+    local _, camera_yaw = client.get_camera_angles_deg()
+    if camera_yaw == nil then
+        return
+    end
+
+    local nearest = nil
+    local nearest_distance = math.huge
+
+    for _, enemy in ipairs(entity.get_enemies()) do
+        if entity.is_alive(enemy) then
+            local enemy_pos = entity.get_player_position(enemy)
+            if enemy_pos then
+                local dx = enemy_pos.X - local_pos.X
+                local dy = enemy_pos.Y - local_pos.Y
+                local dz = enemy_pos.Z - local_pos.Z
+                local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+
+                if distance < nearest_distance then
+                    nearest_distance = distance
+                    nearest = {
+                        player = enemy,
+                        dx = dx,
+                        dz = dz,
+                    }
+                end
+            end
+        end
+    end
+
+    if not nearest then
+        return
+    end
+
+    -- Roblox yaw 0 faces -Z; convert the enemy bearing to camera-relative yaw.
+    local bearing = math.deg(math.atan2(-nearest.dx, -nearest.dz))
+    local relative = ((bearing - camera_yaw + 180) % 360) - 180
+    local radians = math.rad(relative)
+
+    local screen_w, screen_h = render.screen_size()
+    local cx, cy = screen_w * 0.5, screen_h * 0.5
+    local radius = 105
+    local dir_x = math.sin(radians)
+    local dir_y = -math.cos(radians)
+
+    local tip = vector(cx + dir_x * radius, cy + dir_y * radius)
+    local back_x = cx + dir_x * (radius - 20)
+    local back_y = cy + dir_y * (radius - 20)
+    local perp_x = -dir_y * 9
+    local perp_y = dir_x * 9
+    local left = vector(back_x + perp_x, back_y + perp_y)
+    local right = vector(back_x - perp_x, back_y - perp_y)
+
+    local is_behind = math.abs(relative) > 90
+    local arrow_color = is_behind
+        and color(255, 85, 85)
+        or color(80, 220, 255)
+
+    render.triangle(tip, left, right, arrow_color, true, 1)
+    render.circle(cx, cy, radius, color(100, 100, 100), 1)
+
+    local info = entity.get_info(nearest.player)
+    local enemy_name = info and info.name or "ENEMY"
+    local direction_text = is_behind and "BEHIND" or "IN FRONT"
+    local distance_text = string.format("%.0f studs", nearest_distance)
+    local label = string.format("%s  |  %s  |  %s", direction_text, enemy_name, distance_text)
+
+    render.text(cx, cy + 128, label, arrow_color, 14, true, true, Drawing.Fonts.Plex or 2)
+end
+
 local hud_text = Drawing.new("Text")
 hud_text.Text = "MRTHANYS LUA | SCANNING
 p200 resolver ong"
@@ -590,6 +675,7 @@ hud_text.Font = Drawing.Fonts.Plex or 2
 hud_text.Visible = true
 
 client.set_event_callback("paint", function()
+    draw_nearest_enemy_direction()
     if not show_indicator:get() then
         hud_text.Visible = false
         return
@@ -641,4 +727,3 @@ client.set_event_callback("shutdown", function()
     rage.set_resolver_enabled(native_resolver_initial)
     hud_text:Remove()
 end)
-```/
