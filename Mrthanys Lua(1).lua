@@ -20,6 +20,13 @@ local history_size = resolver_sec:new_slider("History samples", 16, 64, 40, 0, "
 local tolerance = resolver_sec:new_slider("Cluster tolerance", 4, 20, 10, 0, "°")
 local miss_cycle_delay = resolver_sec:new_slider("Miss cycle delay", 0, 250, 80, 0, " ms")
 local random_candidate_limit = resolver_sec:new_slider("Random candidates", 2, 10, 6, 0, "")
+
+local aa_sec = tab:new_section("Anti-Aim", "Left")
+local enable_7way = aa_sec:new_toggle("Enable 7-Way AA", false)
+local seven_way_speed = aa_sec:new_slider("7-Way speed", 1, 12, 2, 0, " ticks")
+local enable_head_sway = aa_sec:new_toggle("Enable head sway", false)
+local head_sway_speed = aa_sec:new_slider("Head sway speed", 1, 12, 2, 0, " ticks")
+local head_sway_angle = aa_sec:new_slider("Head sway angle", 10, 70, 40, 0, "°")
 local show_indicator = display_sec:new_toggle("Show resolver indicator", true)
 local show_stats = display_sec:new_toggle("Show hit / miss stats", true)
 
@@ -444,6 +451,55 @@ events.on_tick(function(tick)
     end
 end)
 
+-- Custom Anti-Aim: seven yaw positions plus a four-direction head sway.
+-- Pitch: negative = down, positive = up. Yaw: positive/right, negative/left.
+local seven_way_offsets = { -90, -60, -30, 0, 30, 60, 90 }
+local head_sway_pitches = { -35, 0, 0, 35 }
+local aa_was_active = false
+
+events.on_tick(function(tick)
+    local seven_way_on = enable_7way:get()
+    local head_sway_on = enable_head_sway:get()
+
+    if not seven_way_on and not head_sway_on then
+        if aa_was_active then
+            aa.reset()
+            aa_was_active = false
+        end
+        return
+    end
+
+    aa_was_active = true
+    aa.override_yaw(180, "camera")
+
+    local yaw_offset = 0
+
+    if seven_way_on then
+        local speed = math.max(1, math.floor(seven_way_speed:get()))
+        local index = (math.floor(tick / speed) % #seven_way_offsets) + 1
+        yaw_offset += seven_way_offsets[index]
+    end
+
+    if head_sway_on then
+        local speed = math.max(1, math.floor(head_sway_speed:get()))
+        local index = (math.floor(tick / speed) % 4) + 1
+        local angle = head_sway_angle:get()
+
+        -- Down -> right -> left -> up, repeating at the selected jitter speed.
+        aa.override_pitch(head_sway_pitches[index])
+
+        if index == 2 then
+            yaw_offset += angle
+        elseif index == 3 then
+            yaw_offset -= angle
+        end
+    else
+        aa.override_pitch(nil)
+    end
+
+    aa.override_yaw_offset(yaw_offset)
+end)
+
 local MISS_REASON_TEXT = {
     resolver = "likely angle / resolver mismatch",
     spread = "spread or inaccuracy",
@@ -637,5 +693,9 @@ end)
 client.set_event_callback("shutdown", function()
     reset_all_tracked()
     rage.set_resolver_enabled(native_resolver_initial)
+    if aa_was_active then
+        aa.reset()
+        aa_was_active = false
+    end
     hud_text:Remove()
 end)
