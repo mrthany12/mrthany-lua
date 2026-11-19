@@ -22,7 +22,6 @@ local miss_cycle_delay = resolver_sec:new_slider("Miss cycle delay", 0, 250, 80,
 local random_candidate_limit = resolver_sec:new_slider("Random candidates", 2, 10, 6, 0, "")
 local show_indicator = display_sec:new_toggle("Show resolver indicator", true)
 local show_stats = display_sec:new_toggle("Show hit / miss stats", true)
-local show_enemy_direction = display_sec:new_toggle("Show nearest enemy line", true)
 
 local states_by_player = {}
 local next_update_phase = 0
@@ -580,80 +579,6 @@ client.set_event_callback("aim_hit", function(e)
     end
 end)
 
--- Single-line nearest-enemy direction indicator (camera-relative).
-local function draw_nearest_enemy_direction()
-    if not show_enemy_direction:get() then
-        return
-    end
-
-    local local_player = entity.get_local_player()
-    if not local_player or not entity.is_alive(local_player) then
-        return
-    end
-
-    local local_pos = entity.get_player_position(local_player)
-    if not local_pos then
-        return
-    end
-
-    local _, camera_yaw = client.get_camera_angles_deg()
-    if camera_yaw == nil then
-        return
-    end
-
-    local nearest_dx = nil
-    local nearest_dz = nil
-    local nearest_distance = math.huge
-
-    for _, enemy in ipairs(entity.get_enemies()) do
-        if entity.is_alive(enemy) then
-            local enemy_pos = entity.get_player_position(enemy)
-            if enemy_pos then
-                local dx = enemy_pos.X - local_pos.X
-                local dy = enemy_pos.Y - local_pos.Y
-                local dz = enemy_pos.Z - local_pos.Z
-                local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
-
-                if distance < nearest_distance then
-                    nearest_distance = distance
-                    nearest_dx = dx
-                    nearest_dz = dz
-                end
-            end
-        end
-    end
-
-    if nearest_dx == nil then
-        return
-    end
-
-    -- Roblox yaw 0 faces -Z. Convert the nearest enemy's bearing
-    -- into a camera-relative direction on the screen.
-    local bearing = math.deg(math.atan2(-nearest_dx, -nearest_dz))
-    local relative = ((bearing - camera_yaw + 180) % 360) - 180
-    local radians = math.rad(relative)
-
-    local screen_w, screen_h = render.screen_size()
-    local cx, cy = screen_w * 0.5, screen_h * 0.5
-    local dir_x = -math.sin(radians)
-    local dir_y = -math.cos(radians)
-
-    local is_behind = math.abs(relative) > 90
-    local line_color = is_behind
-        and color(255, 85, 85)
-        or color(80, 220, 255)
-
-    -- Exactly one line: red when the closest enemy is behind, cyan otherwise.
-    render.line(
-        cx,
-        cy,
-        cx + dir_x * 125,
-        cy + dir_y * 125,
-        line_color,
-        3
-    )
-end
-
 local hud_text = Drawing.new("Text")
 hud_text.Text = "MRTHANYS LUA | SCANNING\np200 resolver ong"
 hud_text.Position = vector(16, 316)
@@ -663,8 +588,6 @@ hud_text.Font = Drawing.Fonts.Plex or 2
 hud_text.Visible = true
 
 client.set_event_callback("paint", function()
-    render.clear()
-    draw_nearest_enemy_direction()
     if not show_indicator:get() then
         hud_text.Visible = false
         return
