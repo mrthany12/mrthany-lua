@@ -1,0 +1,22 @@
+aa.is_manual() -> boolean: Returns whether manual anti-aim is currently active ("Left", "Right", or "Back").
+  aa.get_manual() -> string?: Returns active manual direction ("Left", "Right", "Back", or nil).
+  aa.set_manual(dir): Sets active manual direction ("Left", "Right", "Back", or nil to clear).
+  aa.get_slider_yaw_offset() -> number: Returns the menu Yaw offset slider value. Aliases: aa.get_menu_yaw_offset(),
+  aa.get_base_yaw_offset(), aa.get_yaw_slider().
+  aa.override_yaw_offset(deg, relativeToSlider): Sets static angle offset added to base yaw. If relativeToSlider is
+  true, adds deg to the menu slider offset (slider + deg). If relativeToSlider is false or omitted, directly
+  overrides the offset angle.
+  aa.add_yaw_offset(deg): Convenience helper that adds deg to the menu slider offset (get_slider_yaw_offset() + deg).
+  plist.set(target, "Force pitch", boolean | number): Enables manual pitch override or directly sets pitch angle for
+  target.
+  plist.set(target, "Force pitch value", number | string): Overrides enemy pitch. Supports numbers [-89..89] and
+  presets ("Down", "Up", "Zero"). Authoritatively applies to hitboxes, backtrack calculations, target scanning, and
+  visual model rendering.
+  rage.override_player_pitch(target, deg) / rage.set_player_pitch(target, deg): Overrides target pitch.
+  rage.get_player_pitch(target) -> number?: Returns active forced pitch override for target, or nil if not
+  overridden.
+  rage.is_player_pitch_overridden(target) -> boolean: Checks if target has a forced pitch active.
+  rage.reset_player_pitch(target): Restores target pitch to normal.
+  rage.reset_player(target) / rage.reset_resolver(target): Restores target angles (both yaw and pitch) to default.
+  entity.get_prop(target, "resolved_pitch") / entity.get_prop(target, "m_angEyeAngles_resolved[0]"): Authoritative
+  resolved pitch in degrees accounting for force pitch and resolver overrides.
