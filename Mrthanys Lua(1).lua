@@ -30,6 +30,19 @@ local head_sway_angle = aa_sec:new_slider("Head sway angle", 10, 70, 40, 0, "°"
 local show_indicator = display_sec:new_toggle("Show resolver indicator", true)
 local show_stats = display_sec:new_toggle("Show hit / miss stats", true)
 
+local autostop_sec = tab:new_section("Auto Stop", "Right")
+local autostop_enabled = autostop_sec:new_toggle("Enable auto stop", false)
+local autostop_mode = autostop_sec:new_combobox(
+    "Stop mode",
+    { "None", "FullStop", "SlowdownOnly", "OppositeDirection" },
+    "FullStop"
+)
+local autostop_strength = autostop_sec:new_slider("Brake strength", 10, 160, 55, 0, " studs/s²")
+local autostop_delay = autostop_sec:new_slider("Pre-stop delay", 0, 300, 40, 0, " ms")
+local autostop_release_delay = autostop_sec:new_slider("Release delay", 0, 300, 100, 0, " ms")
+local autostop_min_speed = autostop_sec:new_slider("Minimum speed", 0, 10, 1, 1, " studs/s")
+local autostop_horizontal_only = autostop_sec:new_toggle("Horizontal only", true)
+
 local states_by_player = {}
 local next_update_phase = 0
 local shots_by_id = {}
@@ -500,6 +513,279 @@ events.on_tick(function(tick)
     aa.override_yaw_offset(yaw_offset)
 end)
 
+-- Auto Stop: uses the active rage scan target as a pre-shot trigger.
+-- A capped VectorForce brakes existing momentum smoothly without rewriting
+-- the player's movement input or reacting to aim_fire after the shot.
+local autostop_attachment = nil
+local autostop_force = nil
+local autostop_root = nil
+local autostop_first_target_time = nil
+local autostop_last_target_time = nil
+local autostop_previous_velocity = nil
+local autostop_previous_sample_time = nil
+local autostop_knockback_until = 0
+local autostop_error_logged = false
+
+local function autostop_zero_force()
+    if autostop_force then
+        pcall(function()
+            autostop_force.Force = Vector3.new(0, 0, 0)
+        end)
+    end
+end
+
+local function autostop_destroy_force()
+    autostop_zero_force()
+
+    if autostop_force then
+        pcall(function() autostop_force:Destroy() end)
+    end
+    if autostop_attachment then
+        pcall(function() autostop_attachment:Destroy() end)
+    end
+
+    autostop_force = nil
+    autostop_attachment = nil
+    autostop_root = nil
+end
+
+local function autostop_ensure_force(root)
+    if autostop_root == root and autostop_force and autostop_attachment then
+        return true
+    end
+
+    autostop_destroy_force()
+
+    local ok, attachment, force = pcall(function()
+        local new_attachment = Instance.new("Attachment")
+        new_attachment.Name = "MrthanysAutoStopAttachment"
+        new_attachment.Parent = root
+
+        local new_force = Instance.new("VectorForce")
+        new_force.Name = "MrthanysAutoStopForce"
+        new_force.Attachment0 = new_attachment
+        new_force.RelativeTo = Enum.ActuatorRelativeTo.World
+        new_force.ApplyAtCenterOfMass = true
+        new_force.Force = Vector3.new(0, 0, 0)
+        new_force.Parent = root
+
+        return new_attachment, new_force
+    end)
+
+    if not ok then
+        return false
+    end
+
+    autostop_root = root
+    autostop_attachment = attachment
+    autostop_force = force
+    return true
+end
+
+local function autostop_has_scanned_target()
+    local target = rage.get_target()
+    return target ~= nil
+        and target.player ~= nil
+        and entity.is_alive(target.player)
+end
+
+local function autostop_is_unsafe(humanoid, local_player, now)
+    if humanoid.Sit or humanoid.PlatformStand or humanoid.SeatPart ~= nil then
+        return true
+    end
+
+    local state = humanoid:GetState()
+    local states = Enum.HumanoidStateType
+
+    if state == states.Climbing
+        or state == states.Swimming
+        or state == states.Seated
+        or state == states.Physics
+        or state == states.PlatformStanding
+        or state == states.FallingDown
+        or state == states.Ragdoll
+        or state == states.Dead
+        or state == states.Jumping
+        or state == states.Freefall
+    then
+        return true
+    end
+
+    -- Best-effort game-specific noclip flags; the public API has no universal
+    -- noclip/knockback state query.
+    local character = local_player.Character
+    if character and (
+        character:GetAttribute("Noclip") == true
+        or humanoid:GetAttribute("Noclip") == true
+    ) then
+        return true
+    end
+
+    return not movement.is_grounded(local_player)
+        or now < autostop_knockback_until
+end
+
+local function autostop_update()
+    local now = globals.realtime()
+    local mode = autostop_mode:get()
+
+    if not autostop_enabled:get() or mode == "None" then
+        autostop_zero_force()
+        autostop_first_target_time = nil
+        autostop_last_target_time = nil
+        autostop_previous_velocity = nil
+        autostop_previous_sample_time = nil
+        autostop_knockback_until = 0
+        return
+    end
+
+    local target_found = autostop_has_scanned_target()
+    local delay_seconds = autostop_delay:get() / 1000
+    local release_seconds = autostop_release_delay:get() / 1000
+
+    if target_found then
+        if autostop_first_target_time == nil then
+            autostop_first_target_time = now
+        end
+        autostop_last_target_time = now
+    end
+
+    local target_recent = target_found
+        or (
+            autostop_last_target_time ~= nil
+            and now - autostop_last_target_time <= release_seconds
+        )
+
+    if not target_recent then
+        autostop_zero_force()
+        autostop_first_target_time = nil
+        autostop_last_target_time = nil
+        return
+    end
+
+    if autostop_first_target_time == nil
+        or now - autostop_first_target_time < delay_seconds
+    then
+        autostop_zero_force()
+        return
+    end
+
+    local local_player = entity.get_local_player()
+    if not local_player then
+        autostop_zero_force()
+        return
+    end
+
+    local character = local_player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+
+    if not humanoid or not root or autostop_is_unsafe(humanoid, local_player, now) then
+        autostop_zero_force()
+        return
+    end
+
+    local velocity = root.AssemblyLinearVelocity
+    local sample_dt = globals.tickinterval()
+    if autostop_previous_velocity ~= nil and autostop_previous_sample_time ~= nil then
+        sample_dt = math.max(now - autostop_previous_sample_time, 1 / 240)
+        local acceleration = (velocity - autostop_previous_velocity).Magnitude / sample_dt
+        if acceleration > 240 then
+            autostop_knockback_until = now + 0.25
+        end
+    end
+    autostop_previous_velocity = velocity
+    autostop_previous_sample_time = now
+
+    if now < autostop_knockback_until then
+        autostop_zero_force()
+        return
+    end
+
+    local brake_velocity
+    if autostop_horizontal_only:get() then
+        brake_velocity = Vector3.new(velocity.X, 0, velocity.Z)
+    else
+        brake_velocity = velocity
+    end
+
+    local speed = brake_velocity.Magnitude
+    local min_speed = autostop_min_speed:get()
+    if speed <= min_speed then
+        autostop_zero_force()
+        return
+    end
+
+    local direction = brake_velocity.Unit
+    local mode_scale = 1
+
+    if mode == "SlowdownOnly" then
+        mode_scale = 0.4
+    elseif mode == "OppositeDirection" then
+        -- Counter only the component of velocity aligned with the player's
+        -- current movement input. Perpendicular strafing is left untouched.
+        local move_direction = humanoid.MoveDirection
+        local input_dir = Vector3.new(move_direction.X, 0, move_direction.Z)
+        if input_dir.Magnitude < 0.05 then
+            autostop_zero_force()
+            return
+        end
+
+        input_dir = input_dir.Unit
+        local aligned_speed = brake_velocity:Dot(input_dir)
+        if aligned_speed <= min_speed then
+            autostop_zero_force()
+            return
+        end
+
+        brake_velocity = input_dir * aligned_speed
+        speed = math.abs(aligned_speed)
+        direction = brake_velocity.Unit
+    elseif mode ~= "FullStop" then
+        autostop_zero_force()
+        return
+    end
+
+    local engage_ramp = math.min(1, (now - (autostop_first_target_time + delay_seconds)) / 0.12)
+    local release_fade = 1
+    if not target_found and release_seconds > 0 then
+        release_fade = math.max(0, 1 - (now - autostop_last_target_time) / release_seconds)
+    end
+
+    local deceleration = autostop_strength:get() * mode_scale * engage_ramp * release_fade
+    local safe_dt = math.max(math.min(sample_dt, 0.05), 1 / 240)
+    deceleration = math.min(deceleration, (speed / safe_dt) * 0.8)
+
+    local mass = root.AssemblyMass
+    if mass == nil or mass <= 0 then
+        autostop_zero_force()
+        return
+    end
+
+    if not autostop_ensure_force(root) then
+        autostop_zero_force()
+        return
+    end
+
+    local force_vector = direction * (-deceleration * mass)
+    if autostop_horizontal_only:get() then
+        force_vector = Vector3.new(force_vector.X, 0, force_vector.Z)
+    end
+
+    autostop_force.Force = force_vector
+end
+
+events.on_tick(function()
+    local ok, err = pcall(autostop_update)
+    if not ok then
+        autostop_zero_force()
+        if not autostop_error_logged then
+            autostop_error_logged = true
+            client.log("[Mrthanys Lua][AutoStop] " .. tostring(err))
+        end
+    end
+end)
+
 local MISS_REASON_TEXT = {
     resolver = "likely angle / resolver mismatch",
     spread = "spread or inaccuracy",
@@ -697,5 +983,6 @@ client.set_event_callback("shutdown", function()
         aa.reset()
         aa_was_active = false
     end
+    autostop_destroy_force()
     hud_text:Remove()
 end)
