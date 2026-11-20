@@ -27,6 +27,15 @@ local seven_way_speed = aa_sec:new_slider("7-Way speed", 1, 12, 2, 0, " ticks")
 local enable_head_sway = aa_sec:new_toggle("Enable head sway", false)
 local head_sway_speed = aa_sec:new_slider("Head sway speed", 1, 12, 2, 0, " ticks")
 local head_sway_angle = aa_sec:new_slider("Head sway angle", 10, 70, 40, 0, "°")
+local fake_flick_enabled = aa_sec:new_toggle("Enable fake flick", false)
+local fake_flick_mode = aa_sec:new_combobox(
+    "Fake flick axis",
+    { "Yaw", "Pitch", "Both" },
+    "Yaw"
+)
+local fake_flick_angle = aa_sec:new_slider("Fake flick angle", 10, 89, 45, 0, "°")
+local fake_flick_interval = aa_sec:new_slider("Fake flick interval", 2, 32, 12, 0, " ticks")
+local fake_flick_duration = aa_sec:new_slider("Fake flick duration", 1, 4, 1, 0, " ticks")
 local show_indicator = display_sec:new_toggle("Show resolver indicator", true)
 local show_stats = display_sec:new_toggle("Show hit / miss stats", true)
 
@@ -473,8 +482,9 @@ local aa_was_active = false
 events.on_tick(function(tick)
     local seven_way_on = enable_7way:get()
     local head_sway_on = enable_head_sway:get()
+    local fake_flick_on = fake_flick_enabled:get()
 
-    if not seven_way_on and not head_sway_on then
+    if not seven_way_on and not head_sway_on and not fake_flick_on then
         if aa_was_active then
             aa.reset()
             aa_was_active = false
@@ -486,6 +496,7 @@ events.on_tick(function(tick)
     aa.override_yaw(180, "camera")
 
     local yaw_offset = 0
+    local pitch_value = nil
 
     if seven_way_on then
         local speed = math.max(1, math.floor(seven_way_speed:get()))
@@ -499,17 +510,44 @@ events.on_tick(function(tick)
         local angle = head_sway_angle:get()
 
         -- Down -> right -> left -> up, repeating at the selected jitter speed.
-        aa.override_pitch(head_sway_pitches[index])
+        pitch_value = head_sway_pitches[index]
 
         if index == 2 then
             yaw_offset += angle
         elseif index == 3 then
             yaw_offset -= angle
         end
-    else
-        aa.override_pitch(nil)
     end
 
+    if fake_flick_on then
+        local interval = math.max(2, math.floor(fake_flick_interval:get()))
+        local duration = math.max(1, math.min(
+            math.floor(fake_flick_duration:get()),
+            interval - 1
+        ))
+        local tick_in_cycle = tick % interval
+        local flick_active = tick_in_cycle < duration
+
+        if flick_active then
+            -- Alternate the brief fake angle, then fall back to the normal
+            -- 7-Way/head-sway angle for the remainder of the cycle.
+            local cycle = math.floor(tick / interval)
+            local sign = (cycle % 2 == 0) and 1 or -1
+            local flick_angle = fake_flick_angle:get()
+            local axis = fake_flick_mode:get()
+
+            if axis == "Yaw" or axis == "Both" then
+                yaw_offset += flick_angle * sign
+            end
+
+            if axis == "Pitch" or axis == "Both" then
+                pitch_value = flick_angle * sign
+            end
+        end
+    end
+
+    -- Re-applied every tick so the flick reliably returns to the base angle.
+    aa.override_pitch(pitch_value)
     aa.override_yaw_offset(yaw_offset)
 end)
 
