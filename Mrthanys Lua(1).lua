@@ -698,7 +698,9 @@ events.on_tick(function(tick)
         if flick_active then
             fake_flick_apply_desync(flick_degrees, flick_method)
         else
-            fake_flick_call_aa("override_desync", 0, 0)
+            if flick_method == "Fake Desync" then
+                fake_flick_call_aa("override_desync", 0, 0)
+            end
             fake_flick_call_aa("override_inverter", fake_flick_base_inverter)
             fake_flick_call_aa("override_desync_limits", 86, 86)
         end
