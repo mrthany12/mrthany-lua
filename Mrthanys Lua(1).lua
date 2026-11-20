@@ -483,6 +483,8 @@ end)
 local seven_way_offsets = { -90, -60, -30, 0, 30, 60, 90 }
 local head_sway_pitches = { -35, 0, 0, 35 }
 local aa_was_active = false
+local fake_flick_was_enabled = false
+local fake_flick_base_inverter = false
 
 local function fake_flick_clamp(value, minimum, maximum)
     value = tonumber(value)
@@ -582,6 +584,23 @@ events.on_tick(function(tick)
     local head_sway_on = enable_head_sway:get()
     local fake_flick_on = fake_flick_enabled:get()
 
+    if fake_flick_on and not fake_flick_was_enabled then
+        local inverter = false
+        if aa and type(aa.get_inverter) == "function" then
+            local ok, value = pcall(aa.get_inverter)
+            if ok then
+                inverter = value
+            end
+        end
+        fake_flick_base_inverter = inverter
+        fake_flick_was_enabled = true
+    elseif not fake_flick_on and fake_flick_was_enabled then
+        -- Drop Fake Flick's temporary desync/fakelag overrides before the
+        -- other AA modes are reapplied below.
+        fake_flick_call_aa("reset")
+        fake_flick_was_enabled = false
+    end
+
     if not seven_way_on and not head_sway_on and not fake_flick_on then
         if aa_was_active then
             aa.reset()
@@ -595,13 +614,18 @@ events.on_tick(function(tick)
     local manage_base = fake_flick_on and fake_flick_manage_base:get()
     if manage_base then
         fake_flick_call_aa("override_pitch", "Down")
-        fake_flick_call_aa("override_yaw", 180, "camera")
         fake_flick_call_aa("override_body_yaw", true)
         fake_flick_call_aa("override_desync_limits", 86, 86)
         fake_flick_call_aa("override_fake_lag", true)
         fake_flick_call_aa("override_fake_lag_limit", 14)
     elseif fake_flick_on and fake_flick_method:get() ~= "Yaw Offset" then
         fake_flick_call_aa("override_body_yaw", true)
+    end
+
+    -- Preserve the existing script's backward base yaw for 7-Way and
+    -- Head Sway; Manage Base AA also enables it for Fake Flick by itself.
+    if manage_base or seven_way_on or head_sway_on then
+        fake_flick_call_aa("override_yaw", 180, "camera")
     end
 
     local yaw_offset = 0
@@ -646,17 +670,9 @@ events.on_tick(function(tick)
 
         flick_active = velocity_allowed and choke_allowed and cycle < width
 
-        -- Start from the configured inverter side, then reverse it while
-        -- travelling left (negative world-X velocity) to counter A-strafing.
-        local inverter = false
-        if aa and type(aa.get_inverter) == "function" then
-            local ok, value = pcall(aa.get_inverter)
-            if ok then
-                inverter = value
-            end
-        end
-
-        local side = inverter and -1 or 1
+        -- Start from the inverter state captured when Fake Flick was enabled,
+        -- then invert it while moving left (negative world-X velocity).
+        local side = fake_flick_base_inverter and -1 or 1
         if velocity > 10 and velocity_x < -10 then
             side = -side
         end
@@ -668,24 +684,28 @@ events.on_tick(function(tick)
                 fake_flick_call_aa("unchoke")
             end
         end
+
+        -- Restore symmetrical base limits before applying a method-specific
+        -- pulse. This prevents the Limits method from feeding its own inverter
+        -- back into the next pulse's starting side.
+        fake_flick_call_aa("override_inverter", fake_flick_base_inverter)
+        fake_flick_call_aa("override_desync_limits", 86, 86)
     end
 
     if fake_flick_on and flick_method == "Yaw Offset" then
         yaw_offset += flick_degrees
-        -- The combined yaw offset is written once, avoiding callbacks
-        -- fighting each other or overwriting 7-Way / Head Sway.
-        fake_flick_call_aa("override_desync_limits", 86, 86)
     elseif fake_flick_on then
-        -- Non-yaw methods use the desync channel; restore symmetric base
-        -- limits between flicks so each pulse is temporary.
         if flick_active then
             fake_flick_apply_desync(flick_degrees, flick_method)
         else
             fake_flick_call_aa("override_desync", 0, 0)
+            fake_flick_call_aa("override_inverter", fake_flick_base_inverter)
             fake_flick_call_aa("override_desync_limits", 86, 86)
         end
     end
 
+    -- Write each composed angle once so Fake Flick doesn't fight 7-Way or
+    -- Head Sway, and the normal composed angle is restored outside the pulse.
     fake_flick_call_aa("override_pitch", pitch_value)
     fake_flick_call_aa("override_yaw_offset", yaw_offset)
 end)
