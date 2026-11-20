@@ -28,19 +28,19 @@ local enable_head_sway = aa_sec:new_toggle("Enable head sway", false)
 local head_sway_speed = aa_sec:new_slider("Head sway speed", 1, 12, 2, 0, " ticks")
 local head_sway_angle = aa_sec:new_slider("Head sway angle", 10, 70, 40, 0, "°")
 local fake_flick_enabled = aa_sec:new_toggle("Enable fake flick", false)
-local fake_flick_mode = aa_sec:new_combobox(
-    "Fake flick axis",
-    { "Yaw", "Pitch", "Both" },
-    "Yaw"
+local fake_flick_method = aa_sec:new_combobox(
+    "Fake flick method",
+    { "Yaw Offset", "Fake Desync", "Limits" },
+    "Yaw Offset"
 )
-local fake_flick_angle = aa_sec:new_slider("Fake flick angle", 10, 89, 45, 0, "°")
-local fake_flick_direction = aa_sec:new_combobox(
-    "Fake flick direction",
-    { "Right to Left", "Left to Right" },
-    "Right to Left"
-)
-local fake_flick_interval = aa_sec:new_slider("Fake flick interval", 3, 32, 12, 0, " ticks")
-local fake_flick_duration = aa_sec:new_slider("Fake flick duration", 2, 8, 2, 0, " ticks")
+local fake_flick_speed = aa_sec:new_slider("Fake flick speed", 2, 64, 8, 0, "t")
+local fake_flick_ticks = aa_sec:new_slider("Flick ticks", 1, 8, 2, 0, "t")
+local fake_flick_angle = aa_sec:new_slider("Flick angle", 0, 180, 180, 0, "°")
+local fake_flick_velocity_check = aa_sec:new_toggle("Velocity check", true)
+local fake_flick_max_velocity = aa_sec:new_slider("Max velocity", 0, 320, 90, 0, "")
+local fake_flick_only_choked = aa_sec:new_toggle("Only while choking", true)
+local fake_flick_unchoke = aa_sec:new_toggle("Unchoke on flick", true)
+local fake_flick_manage_base = aa_sec:new_toggle("Manage base AA", true)
 local show_indicator = display_sec:new_toggle("Show resolver indicator", true)
 local show_stats = display_sec:new_toggle("Show hit / miss stats", true)
 
@@ -484,7 +484,100 @@ local seven_way_offsets = { -90, -60, -30, 0, 30, 60, 90 }
 local head_sway_pitches = { -35, 0, 0, 35 }
 local aa_was_active = false
 
+local function fake_flick_clamp(value, minimum, maximum)
+    value = tonumber(value)
+    if value == nil then
+        return minimum
+    end
+    return math.max(minimum, math.min(maximum, value))
+end
+
+local function fake_flick_call_aa(name, ...)
+    if aa and type(aa[name]) == "function" then
+        return pcall(aa[name], ...)
+    end
+    return false
+end
+
+-- Velocity is read from the documented entity API. The character velocity
+-- fallback keeps the feature working if the entity wrapper is unavailable.
+local function fake_flick_get_velocity()
+    if entity and type(entity.get_local_player) == "function"
+        and type(entity.get_player_velocity) == "function"
+    then
+        local ok_player, local_player = pcall(entity.get_local_player)
+        if ok_player and local_player then
+            local ok_velocity, velocity = pcall(entity.get_player_velocity, local_player)
+            if ok_velocity and velocity
+                and type(velocity.X) == "number"
+                and type(velocity.Z) == "number"
+            then
+                return math.sqrt(velocity.X * velocity.X + velocity.Z * velocity.Z),
+                    velocity.X,
+                    velocity.Z
+            end
+        end
+    end
+
+    local ok, speed, vx, vz = pcall(function()
+        local local_player = game:GetService("Players").LocalPlayer
+        local character = local_player and local_player.Character
+        local root = character and (
+            character:FindFirstChild("HumanoidRootPart")
+            or character:FindFirstChild("Collide")
+            or character.PrimaryPart
+        )
+        if root and root:IsA("BasePart") then
+            local velocity = root.AssemblyLinearVelocity
+            return math.sqrt(velocity.X * velocity.X + velocity.Z * velocity.Z),
+                velocity.X,
+                velocity.Z
+        end
+        return 0, 0, 0
+    end)
+
+    return ok and speed or 0, ok and vx or 0, ok and vz or 0
+end
+
+local function fake_flick_is_choking()
+    if aa and type(aa.is_fake_lag_choking) == "function" then
+        local ok, choking = pcall(aa.is_fake_lag_choking)
+        if ok then
+            return choking
+        end
+    end
+    return true
+end
+
+local function fake_flick_apply_desync(degrees, method)
+    if method == "Fake Desync" then
+        local fake_angle = fake_flick_clamp(degrees, -86, 86)
+        local ok = fake_flick_call_aa("override_desync", 0, fake_angle)
+
+        if not ok then
+            if fake_angle >= 0 then
+                fake_flick_call_aa("override_inverter", true)
+                fake_flick_call_aa("override_desync_limits", 0, math.abs(fake_angle))
+            else
+                fake_flick_call_aa("override_inverter", false)
+                fake_flick_call_aa("override_desync_limits", math.abs(fake_angle), 0)
+            end
+        end
+    elseif method == "Limits" then
+        local magnitude = fake_flick_clamp(math.abs(degrees), 0, 86)
+        if degrees >= 0 then
+            fake_flick_call_aa("override_inverter", true)
+            fake_flick_call_aa("override_desync_limits", 0, magnitude)
+        else
+            fake_flick_call_aa("override_inverter", false)
+            fake_flick_call_aa("override_desync_limits", magnitude, 0)
+        end
+    end
+end
+
 events.on_tick(function(tick)
+    tick = math.floor(tonumber(tick) or 0)
+
     local seven_way_on = enable_7way:get()
     local head_sway_on = enable_head_sway:get()
     local fake_flick_on = fake_flick_enabled:get()
@@ -498,10 +591,21 @@ events.on_tick(function(tick)
     end
 
     aa_was_active = true
-    aa.override_yaw(180, "camera")
+
+    local manage_base = fake_flick_on and fake_flick_manage_base:get()
+    if manage_base then
+        fake_flick_call_aa("override_pitch", "Down")
+        fake_flick_call_aa("override_yaw", 180, "camera")
+        fake_flick_call_aa("override_body_yaw", true)
+        fake_flick_call_aa("override_desync_limits", 86, 86)
+        fake_flick_call_aa("override_fake_lag", true)
+        fake_flick_call_aa("override_fake_lag_limit", 14)
+    elseif fake_flick_on and fake_flick_method:get() ~= "Yaw Offset" then
+        fake_flick_call_aa("override_body_yaw", true)
+    end
 
     local yaw_offset = 0
-    local pitch_value = nil
+    local pitch_value = manage_base and "Down" or nil
 
     if seven_way_on then
         local speed = math.max(1, math.floor(seven_way_speed:get()))
@@ -524,44 +628,66 @@ events.on_tick(function(tick)
         end
     end
 
+    local flick_degrees = 0
+    local flick_active = false
+    local flick_method = fake_flick_method:get() or "Yaw Offset"
+
     if fake_flick_on then
-        local interval = math.max(3, math.floor(fake_flick_interval:get()))
-        local duration = math.max(2, math.min(
-            math.floor(fake_flick_duration:get()),
-            interval - 1
-        ))
-        local tick_in_cycle = tick % interval
+        local velocity, velocity_x = fake_flick_get_velocity()
+        local max_velocity = fake_flick_clamp(fake_flick_max_velocity:get(), 0, 320)
+        local velocity_allowed = not fake_flick_velocity_check:get()
+            or velocity <= max_velocity
+        local choke_allowed = not fake_flick_only_choked:get()
+            or fake_flick_is_choking()
 
-        if tick_in_cycle < duration then
-            -- Sweep across both sides of the current AA angle during the
-            -- flick window, then restore the normal 7-Way/head-sway angle.
-            local first_side_ticks = math.max(1, math.floor(duration / 2))
-            local moving_right_to_left = fake_flick_direction:get() == "Right to Left"
-            local on_first_side = tick_in_cycle < first_side_ticks
-            local sign
+        local speed = fake_flick_clamp(math.floor(fake_flick_speed:get()), 2, 64)
+        local width = fake_flick_clamp(math.floor(fake_flick_ticks:get()), 1, speed)
+        local cycle = tick % speed
 
-            if moving_right_to_left then
-                sign = on_first_side and 1 or -1
-            else
-                sign = on_first_side and -1 or 1
+        flick_active = velocity_allowed and choke_allowed and cycle < width
+
+        -- Start from the configured inverter side, then reverse it while
+        -- travelling left (negative world-X velocity) to counter A-strafing.
+        local inverter = false
+        if aa and type(aa.get_inverter) == "function" then
+            local ok, value = pcall(aa.get_inverter)
+            if ok then
+                inverter = value
             end
+        end
 
-            local flick_angle = fake_flick_angle:get()
-            local axis = fake_flick_mode:get()
+        local side = inverter and -1 or 1
+        if velocity > 10 and velocity_x < -10 then
+            side = -side
+        end
 
-            if axis == "Yaw" or axis == "Both" then
-                yaw_offset += flick_angle * sign
-            end
+        if flick_active then
+            flick_degrees = fake_flick_angle:get() * side
 
-            if axis == "Pitch" or axis == "Both" then
-                pitch_value = flick_angle * sign
+            if fake_flick_unchoke:get() and cycle == 0 then
+                fake_flick_call_aa("unchoke")
             end
         end
     end
 
-    -- Re-applied every tick so the flick reliably returns to the base angle.
-    aa.override_pitch(pitch_value)
-    aa.override_yaw_offset(yaw_offset)
+    if fake_flick_on and flick_method == "Yaw Offset" then
+        yaw_offset += flick_degrees
+        -- The combined yaw offset is written once, avoiding callbacks
+        -- fighting each other or overwriting 7-Way / Head Sway.
+        fake_flick_call_aa("override_desync_limits", 86, 86)
+    elseif fake_flick_on then
+        -- Non-yaw methods use the desync channel; restore symmetric base
+        -- limits between flicks so each pulse is temporary.
+        if flick_active then
+            fake_flick_apply_desync(flick_degrees, flick_method)
+        else
+            fake_flick_call_aa("override_desync", 0, 0)
+            fake_flick_call_aa("override_desync_limits", 86, 86)
+        end
+    end
+
+    fake_flick_call_aa("override_pitch", pitch_value)
+    fake_flick_call_aa("override_yaw_offset", yaw_offset)
 end)
 
 -- Auto Stop: uses the active rage scan target as a pre-shot trigger.
