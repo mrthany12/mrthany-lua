@@ -34,8 +34,13 @@ local fake_flick_mode = aa_sec:new_combobox(
     "Yaw"
 )
 local fake_flick_angle = aa_sec:new_slider("Fake flick angle", 10, 89, 45, 0, "°")
-local fake_flick_interval = aa_sec:new_slider("Fake flick interval", 2, 32, 12, 0, " ticks")
-local fake_flick_duration = aa_sec:new_slider("Fake flick duration", 1, 4, 1, 0, " ticks")
+local fake_flick_direction = aa_sec:new_combobox(
+    "Fake flick direction",
+    { "Right to Left", "Left to Right" },
+    "Right to Left"
+)
+local fake_flick_interval = aa_sec:new_slider("Fake flick interval", 3, 32, 12, 0, " ticks")
+local fake_flick_duration = aa_sec:new_slider("Fake flick duration", 2, 8, 2, 0, " ticks")
 local show_indicator = display_sec:new_toggle("Show resolver indicator", true)
 local show_stats = display_sec:new_toggle("Show hit / miss stats", true)
 
@@ -520,19 +525,27 @@ events.on_tick(function(tick)
     end
 
     if fake_flick_on then
-        local interval = math.max(2, math.floor(fake_flick_interval:get()))
-        local duration = math.max(1, math.min(
+        local interval = math.max(3, math.floor(fake_flick_interval:get()))
+        local duration = math.max(2, math.min(
             math.floor(fake_flick_duration:get()),
             interval - 1
         ))
         local tick_in_cycle = tick % interval
-        local flick_active = tick_in_cycle < duration
 
-        if flick_active then
-            -- Alternate the brief fake angle, then fall back to the normal
-            -- 7-Way/head-sway angle for the remainder of the cycle.
-            local cycle = math.floor(tick / interval)
-            local sign = (cycle % 2 == 0) and 1 or -1
+        if tick_in_cycle < duration then
+            -- Sweep across both sides of the current AA angle during the
+            -- flick window, then restore the normal 7-Way/head-sway angle.
+            local first_side_ticks = math.max(1, math.floor(duration / 2))
+            local moving_right_to_left = fake_flick_direction:get() == "Right to Left"
+            local on_first_side = tick_in_cycle < first_side_ticks
+            local sign
+
+            if moving_right_to_left then
+                sign = on_first_side and 1 or -1
+            else
+                sign = on_first_side and -1 or 1
+            end
+
             local flick_angle = fake_flick_angle:get()
             local axis = fake_flick_mode:get()
 
