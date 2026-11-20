@@ -639,6 +639,39 @@ local function autostop_update()
         return
     end
 
+    -- Sample movement continuously while enabled, including during the
+    -- pre-stop delay, so sudden external impulses can be detected.
+    local local_player = entity.get_local_player()
+    local character = local_player and local_player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+
+    if not local_player or not humanoid or not root then
+        autostop_zero_force()
+        autostop_previous_velocity = nil
+        autostop_previous_sample_time = nil
+        return
+    end
+
+    local velocity = root.AssemblyLinearVelocity
+    local sample_dt = globals.tickinterval()
+    if autostop_previous_velocity ~= nil and autostop_previous_sample_time ~= nil then
+        sample_dt = math.max(math.min(now - autostop_previous_sample_time, 0.05), 1 / 240)
+        local acceleration = (velocity - autostop_previous_velocity).Magnitude / sample_dt
+        if acceleration > 240 then
+            autostop_knockback_until = now + 0.25
+        end
+    end
+    autostop_previous_velocity = velocity
+    autostop_previous_sample_time = now
+
+    if autostop_is_unsafe(humanoid, local_player, now) then
+        autostop_zero_force()
+        return
+    end
+
+    -- rage.get_target() is the active scan result, so braking begins before
+    -- aim_fire. No post-shot callback is used as the trigger.
     local target_found = autostop_has_scanned_target()
     local delay_seconds = autostop_delay:get() / 1000
     local release_seconds = autostop_release_delay:get() / 1000
@@ -669,33 +702,6 @@ local function autostop_update()
         autostop_zero_force()
         return
     end
-
-    local local_player = entity.get_local_player()
-    if not local_player then
-        autostop_zero_force()
-        return
-    end
-
-    local character = local_player.Character
-    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-    local root = character and character:FindFirstChild("HumanoidRootPart")
-
-    if not humanoid or not root or autostop_is_unsafe(humanoid, local_player, now) then
-        autostop_zero_force()
-        return
-    end
-
-    local velocity = root.AssemblyLinearVelocity
-    local sample_dt = globals.tickinterval()
-    if autostop_previous_velocity ~= nil and autostop_previous_sample_time ~= nil then
-        sample_dt = math.max(now - autostop_previous_sample_time, 1 / 240)
-        local acceleration = (velocity - autostop_previous_velocity).Magnitude / sample_dt
-        if acceleration > 240 then
-            autostop_knockback_until = now + 0.25
-        end
-    end
-    autostop_previous_velocity = velocity
-    autostop_previous_sample_time = now
 
     if now < autostop_knockback_until then
         autostop_zero_force()
